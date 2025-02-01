@@ -33,11 +33,15 @@ func RunApp() {
 		readStartDate()
 		readDuration()
 	*/
-	cfg.RunTime.StartDate = time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.Local)
-	cfg.RunTime.EndDate = cfg.RunTime.StartDate.AddDate(0, 0, 1)
+	cfg.RunTime.StartDate = time.Date(2025, 01, 01, 0, 0, 0, 0, time.Local)
+	cfg.RunTime.EndDate = time.Date(2025, 01, 10, 0, 0, 0, 0, time.Local)
 	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format("2006-01-02"))
 	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format("2006-01-02"))
 	calCmsService.QueryEventsFromCalCms()
+	calCmsService.FilterEventsFromCalCms()
+	for entry, data := range cfg.RunTime.Series {
+		fmt.Printf("For %v found %v entries. Uploading %v\r\n", entry, len(data.EventIds), data.FileToUpload)
+	}
 }
 
 func readStartDate() {

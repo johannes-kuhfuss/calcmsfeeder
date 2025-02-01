@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/johannes-kuhfuss/calcmsfeeder/domain"
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
 )
@@ -15,13 +16,15 @@ import (
 // Configuration with subsections
 type AppConfig struct {
 	CalCms struct {
-		CmsUrl                string `envconfig:"CALCMS_URL" default:"https://programm.coloradio.org/agenda/events.cgi"`
-		Template              string `envconfig:"CALCMS_TEMPLATE" default:"event.json-p"`
-		DefaultDurationInDays int    `envconfig:"DEFAULT_DURATION_IN_DAYS" default:"7"`
+		CmsUrl                string            `envconfig:"CALCMS_URL"`
+		Template              string            `envconfig:"CALCMS_TEMPLATE" default:"event.json-p"`
+		DefaultDurationInDays int               `envconfig:"DEFAULT_DURATION_IN_DAYS" default:"7"`
+		SeriesFiles           map[string]string `envconfig:"SERIES_FILES"`
 	}
 	RunTime struct {
 		StartDate time.Time
 		EndDate   time.Time
+		Series    map[string]domain.SeriesInfo
 	}
 }
 
@@ -32,7 +35,7 @@ var (
 // InitConfig initializes the configuration and sets the defaults
 func InitConfig(file string, config *AppConfig) error {
 	if err := loadConfig(file); err != nil {
-		//log.Printf("Error while loading configuration from file. %v", err)
+		return fmt.Errorf("could not load configuration from file: %v", err.Error())
 	}
 	if err := envconfig.Process("", config); err != nil {
 		return fmt.Errorf("could not initialize configuration: %v", err.Error())
@@ -57,6 +60,11 @@ func checkFilePath(filePath *string) {
 
 // setDefaults sets defaults for some configurations items
 func setDefaults(config *AppConfig) {
+	config.RunTime.Series = make(map[string]domain.SeriesInfo)
+	for skey, file := range config.CalCms.SeriesFiles {
+		checkFilePath(&file)
+		config.RunTime.Series[skey] = domain.SeriesInfo{FileToUpload: file}
+	}
 }
 
 // loadConfig loads the configuration from file. Returns an error if loading fails

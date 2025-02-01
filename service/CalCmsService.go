@@ -116,3 +116,14 @@ func (s DefaultCalCmsService) QueryEventsFromCalCms() error {
 	CalCmsPgm.Unlock()
 	return nil
 }
+
+func (s DefaultCalCmsService) FilterEventsFromCalCms() error {
+	for _, event := range CalCmsPgm.data.Events {
+		if entry, ok := s.Cfg.RunTime.Series[event.Skey]; ok {
+			//logger.Infof("Event: %v, Event Id: %v, File: %v", event.Skey, event.EventID, s.Cfg.RunTime.Series[event.Skey].FileToUpload)
+			entry.EventIds = append(entry.EventIds, event.EventID)
+			s.Cfg.RunTime.Series[event.Skey] = entry
+		}
+	}
+	return nil
+}
