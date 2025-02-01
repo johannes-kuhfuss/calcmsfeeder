@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/kelseyhightower/envconfig"
@@ -14,10 +15,13 @@ import (
 // Configuration with subsections
 type AppConfig struct {
 	CalCms struct {
-		CmsUrl   string `envconfig:"CALCMS_URL" default:"https://programm.coloradio.org/agenda/events.cgi"`
-		Template string `envconfig:"CALCMS_TEMPLATE" default:"event.json-p"`
+		CmsUrl                string `envconfig:"CALCMS_URL" default:"https://programm.coloradio.org/agenda/events.cgi"`
+		Template              string `envconfig:"CALCMS_TEMPLATE" default:"event.json-p"`
+		DefaultDurationInDays int    `envconfig:"DEFAULT_DURATION_IN_DAYS" default:"7"`
 	}
 	RunTime struct {
+		StartDate time.Time
+		EndDate   time.Time
 	}
 }
 
@@ -27,15 +31,13 @@ var (
 
 // InitConfig initializes the configuration and sets the defaults
 func InitConfig(file string, config *AppConfig) error {
-	log.Printf("Initializing configuration from file %v...", file)
 	if err := loadConfig(file); err != nil {
-		log.Printf("Error while loading configuration from file. %v", err)
+		//log.Printf("Error while loading configuration from file. %v", err)
 	}
 	if err := envconfig.Process("", config); err != nil {
 		return fmt.Errorf("could not initialize configuration: %v", err.Error())
 	}
 	setDefaults(config)
-	log.Print("Configuration initialized")
 	return nil
 }
 
