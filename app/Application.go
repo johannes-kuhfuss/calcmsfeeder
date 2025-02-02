@@ -19,6 +19,10 @@ var (
 	calCmsService service.DefaultCalCmsService
 )
 
+const (
+	dateFormat = "2006-01-02"
+)
+
 // RunApp orchestrates the application
 func RunApp() {
 	getCmdLine()
@@ -47,8 +51,8 @@ func wireApp() {
 func getUserInput() {
 	readStartDate()
 	readDuration()
-	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format("2006-01-02"))
-	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format("2006-01-02"))
+	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format(dateFormat))
+	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format(dateFormat))
 }
 
 // readStartDate prompts the user for the start date
@@ -73,7 +77,7 @@ func readStartDate() {
 			dateOk = true
 			return
 		}
-		d, err := time.Parse("2006-01-02", startDate)
+		d, err := time.Parse(dateFormat, startDate)
 		if err != nil {
 			fmt.Println("Start Date must be entered as YYYY-MM-DD.")
 		} else {
