@@ -19,9 +19,7 @@ var (
 	calCmsService service.DefaultCalCmsService
 )
 
-const ()
-
-// RunApp orchestrates the startup of the application
+// RunApp orchestrates the application
 func RunApp() {
 	getCmdLine()
 	err := config.InitConfig(config.EnvFile, &cfg)
@@ -29,21 +27,31 @@ func RunApp() {
 		panic(err)
 	}
 	wireApp()
+	getUserInput()
+	queryCalCmsEvents()
+	uploadFilesToCalCms()
+}
+
+// getCmdLine checks the command line arguments
+func getCmdLine() {
+	flag.StringVar(&config.EnvFile, "config.file", ".env", "Specify location of config file. Default is .env")
+	flag.Parse()
+}
+
+// wireApp initializes the services in the right order and injects the dependencies
+func wireApp() {
+	calCmsService = service.NewCalCmsService(&cfg)
+}
+
+// getUserInput retrieves the dates to work on
+func getUserInput() {
 	readStartDate()
 	readDuration()
 	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format("2006-01-02"))
 	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format("2006-01-02"))
-	calCmsService.QueryEventsFromCalCms()
-	calCmsService.FilterEventsFromCalCms()
-	for entry, data := range cfg.RunTime.Series {
-		fmt.Printf("For %v found %v entries. Uploading %v.\r\n", entry, len(data.EventIds), data.FileToUpload)
-		calCmsService.Login(cfg.CalCms.CmsUser, cfg.CalCms.CmsPass)
-		for _, evId := range data.EventIds {
-			calCmsService.UploadFile(evId, data.SeriesId, data.FileToUpload)
-		}
-	}
 }
 
+// readStartDate prompts the user for the start date
 func readStartDate() {
 	var (
 		dateOk    bool = false
@@ -80,6 +88,7 @@ func readStartDate() {
 	}
 }
 
+// readDuration prompts the user for the duration in number of days
 func readDuration() {
 	var (
 		durOk    bool = false
@@ -112,13 +121,32 @@ func readDuration() {
 	}
 }
 
-// getCmdLine checks the command line arguments
-func getCmdLine() {
-	flag.StringVar(&config.EnvFile, "config.file", ".env", "Specify location of config file. Default is .env")
-	flag.Parse()
+// queryCalCmsEvents retrives all events for the date range from calCms and filters them to match the series configuration
+func queryCalCmsEvents() {
+	err := calCmsService.QueryEventsFromCalCms()
+	if err != nil {
+		fmt.Printf("Error while querying events from calCms: %v", err.Error())
+	}
+	err = calCmsService.FilterEventsFromCalCms()
+	if err != nil {
+		fmt.Printf("Error while filtering events from calCms: %v", err.Error())
+	}
 }
 
-// wireApp initializes the services in the right order and injects the dependencies
-func wireApp() {
-	calCmsService = service.NewCalCmsService(&cfg)
+// uploadFilesToCalCms uploads the configured file to calCms for each matching event
+func uploadFilesToCalCms() {
+	for entry, data := range cfg.RunTime.Series {
+		fmt.Printf("For %v found %v entries. Uploading %v.\r\n", entry, len(data.EventIds), data.FileToUpload)
+		err := calCmsService.Login(cfg.CalCms.CmsUser, cfg.CalCms.CmsPass)
+		if err != nil {
+			fmt.Printf("Error while logging into calCms: %v", err.Error())
+			return
+		}
+		for _, evId := range data.EventIds {
+			err := calCmsService.UploadFile(evId, data.SeriesId, data.FileToUpload)
+			if err != nil {
+				fmt.Printf("Error uploading file to calCms: %v", err.Error())
+			}
+		}
+	}
 }
