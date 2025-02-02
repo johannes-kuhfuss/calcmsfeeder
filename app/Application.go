@@ -31,8 +31,6 @@ func RunApp() {
 	wireApp()
 	readStartDate()
 	readDuration()
-	//cfg.RunTime.StartDate = time.Date(2025, 02, 03, 0, 0, 0, 0, time.Local)
-	//cfg.RunTime.EndDate = time.Date(2025, 02, 03, 0, 0, 0, 0, time.Local)
 	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format("2006-01-02"))
 	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format("2006-01-02"))
 	calCmsService.QueryEventsFromCalCms()
