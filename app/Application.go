@@ -29,18 +29,20 @@ func RunApp() {
 		panic(err)
 	}
 	wireApp()
-	/*
-		readStartDate()
-		readDuration()
-	*/
-	cfg.RunTime.StartDate = time.Date(2025, 01, 01, 0, 0, 0, 0, time.Local)
-	cfg.RunTime.EndDate = time.Date(2025, 01, 10, 0, 0, 0, 0, time.Local)
+	readStartDate()
+	readDuration()
+	//cfg.RunTime.StartDate = time.Date(2025, 02, 03, 0, 0, 0, 0, time.Local)
+	//cfg.RunTime.EndDate = time.Date(2025, 02, 03, 0, 0, 0, 0, time.Local)
 	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format("2006-01-02"))
 	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format("2006-01-02"))
 	calCmsService.QueryEventsFromCalCms()
 	calCmsService.FilterEventsFromCalCms()
 	for entry, data := range cfg.RunTime.Series {
-		fmt.Printf("For %v found %v entries. Uploading %v\r\n", entry, len(data.EventIds), data.FileToUpload)
+		fmt.Printf("For %v found %v entries. Uploading %v.\r\n", entry, len(data.EventIds), data.FileToUpload)
+		calCmsService.Login(cfg.CalCms.CmsUser, cfg.CalCms.CmsPass)
+		for _, evId := range data.EventIds {
+			calCmsService.UploadFile(evId, data.SeriesId, data.FileToUpload)
+		}
 	}
 }
 

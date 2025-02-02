@@ -16,10 +16,13 @@ import (
 // Configuration with subsections
 type AppConfig struct {
 	CalCms struct {
-		CmsUrl                string            `envconfig:"CALCMS_URL"`
+		CmsHost               string            `envconfig:"CALCMS_HOST"`
+		CmsUser               string            `envconfig:"CALCMS_USER"`
+		CmsPass               string            `envconfig:"CALCMS_PASS"`
 		Template              string            `envconfig:"CALCMS_TEMPLATE" default:"event.json-p"`
 		DefaultDurationInDays int               `envconfig:"DEFAULT_DURATION_IN_DAYS" default:"7"`
 		SeriesFiles           map[string]string `envconfig:"SERIES_FILES"`
+		SeriesIds             map[string]int    `envconfig:"SERIES_IDS"`
 	}
 	RunTime struct {
 		StartDate time.Time
@@ -63,7 +66,8 @@ func setDefaults(config *AppConfig) {
 	config.RunTime.Series = make(map[string]domain.SeriesInfo)
 	for skey, file := range config.CalCms.SeriesFiles {
 		checkFilePath(&file)
-		config.RunTime.Series[skey] = domain.SeriesInfo{FileToUpload: file}
+		seriesid := config.CalCms.SeriesIds[skey]
+		config.RunTime.Series[skey] = domain.SeriesInfo{FileToUpload: file, SeriesId: seriesid}
 	}
 }
 

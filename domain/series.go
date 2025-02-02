@@ -3,5 +3,6 @@ package domain
 
 type SeriesInfo struct {
 	FileToUpload string
+	SeriesId     int
 	EventIds     []int
 }
