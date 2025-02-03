@@ -33,7 +33,10 @@ func RunApp() {
 	wireApp()
 	getUserInput()
 	queryCalCmsEvents()
-	uploadFilesToCalCms()
+	cont := showStatusAndConfirm()
+	if cont {
+		uploadFilesToCalCms()
+	}
 }
 
 // getCmdLine checks the command line arguments
@@ -51,8 +54,6 @@ func wireApp() {
 func getUserInput() {
 	readStartDate()
 	readDuration()
-	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format(dateFormat))
-	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format(dateFormat))
 }
 
 // readStartDate prompts the user for the start date
@@ -118,11 +119,32 @@ func readDuration() {
 			if (d < 1) || (d > 30) {
 				fmt.Println("Duration must be between 1 and 30.")
 			} else {
-				cfg.RunTime.EndDate = cfg.RunTime.StartDate.AddDate(0, 0, d)
+				cfg.RunTime.EndDate = cfg.RunTime.StartDate.AddDate(0, 0, d-1)
 				return
 			}
 		}
 	}
+}
+
+func showStatusAndConfirm() bool {
+	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format(dateFormat))
+	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format(dateFormat))
+	for entry, data := range cfg.RunTime.Series {
+		fmt.Printf("For %v found %v entries. Will upload %v. (IDs: %v)\r\n", entry, len(data.EventIds), data.FileToUpload, data.EventIds)
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Print("Confirm with \"y\" to continue: ")
+	scanner.Scan()
+	err := scanner.Err()
+	if err != nil {
+		log.Fatal(err)
+	}
+	decision := scanner.Text()
+	if decision != "y" {
+		fmt.Print("Aborting...")
+		return false
+	}
+	return true
 }
 
 // queryCalCmsEvents retrives all events for the date range from calCms and filters them to match the series configuration
@@ -140,7 +162,7 @@ func queryCalCmsEvents() {
 // uploadFilesToCalCms uploads the configured file to calCms for each matching event
 func uploadFilesToCalCms() {
 	for entry, data := range cfg.RunTime.Series {
-		fmt.Printf("For %v found %v entries. Uploading %v.\r\n", entry, len(data.EventIds), data.FileToUpload)
+		fmt.Printf("Uploading for %v.\r\n", entry)
 		err := calCmsService.Login(cfg.CalCms.CmsUser, cfg.CalCms.CmsPass)
 		if err != nil {
 			fmt.Printf("Error while logging into calCms: %v", err.Error())
