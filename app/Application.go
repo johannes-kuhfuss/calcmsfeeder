@@ -33,8 +33,8 @@ func RunApp() {
 	wireApp()
 	getUserInput()
 	queryCalCmsEvents()
-	cont := showStatusAndConfirm()
-	if cont {
+	confirmed := showStatusAndConfirm()
+	if confirmed {
 		uploadFilesToCalCms()
 	}
 }
@@ -130,7 +130,7 @@ func showStatusAndConfirm() bool {
 	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format(dateFormat))
 	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format(dateFormat))
 	for entry, data := range cfg.RunTime.Series {
-		fmt.Printf("For %v found %v entries. Will upload %v. (IDs: %v)\r\n", entry, len(data.EventIds), data.FileToUpload, data.EventIds)
+		fmt.Printf("For \"%v\" found %v entries. Will upload file \"%v\". (IDs: %v)\r\n", entry, len(data.EventIds), data.FileToUpload, data.EventIds)
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Print("Confirm with \"y\" to continue: ")
@@ -162,7 +162,7 @@ func queryCalCmsEvents() {
 // uploadFilesToCalCms uploads the configured file to calCms for each matching event
 func uploadFilesToCalCms() {
 	for entry, data := range cfg.RunTime.Series {
-		fmt.Printf("Uploading for %v.\r\n", entry)
+		fmt.Printf("Uploading files for \"%v\".\r\n", entry)
 		err := calCmsService.Login(cfg.CalCms.CmsUser, cfg.CalCms.CmsPass)
 		if err != nil {
 			fmt.Printf("Error while logging into calCms: %v", err.Error())
