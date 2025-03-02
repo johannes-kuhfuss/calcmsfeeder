@@ -21,6 +21,7 @@ type AppConfig struct {
 		CmsPass               string            `envconfig:"CALCMS_PASS"`
 		Template              string            `envconfig:"CALCMS_TEMPLATE" default:"event.json-p"`
 		DefaultDurationInDays int               `envconfig:"DEFAULT_DURATION_IN_DAYS" default:"7"`
+		MaxDurationInDays     int               `envconfig:"MAX_DURATION_IN_DAYS" default:"30"`
 		SeriesFiles           map[string]string `envconfig:"SERIES_FILES"`
 		SeriesIds             map[string]int    `envconfig:"SERIES_IDS"`
 	}

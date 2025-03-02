@@ -101,7 +101,7 @@ func readDuration() {
 	)
 	scanner := bufio.NewScanner(os.Stdin)
 	for !durOk {
-		fmt.Printf("Enter processing duration in days (1 .. 30, or leave empty for default = %v): ", cfg.CalCms.DefaultDurationInDays)
+		fmt.Printf("Enter processing duration in days (1 .. %v, or leave empty for default = %v): ", cfg.CalCms.MaxDurationInDays, cfg.CalCms.DefaultDurationInDays)
 		scanner.Scan()
 		err := scanner.Err()
 		if err != nil {
@@ -116,8 +116,8 @@ func readDuration() {
 		if err != nil {
 			fmt.Println("Duration must be a numeric value.")
 		} else {
-			if (d < 1) || (d > 30) {
-				fmt.Println("Duration must be between 1 and 30.")
+			if (d < 1) || (d > cfg.CalCms.MaxDurationInDays) {
+				fmt.Printf("Duration must be between 1 and %v.\r\n", cfg.CalCms.MaxDurationInDays)
 			} else {
 				cfg.RunTime.EndDate = cfg.RunTime.StartDate.AddDate(0, 0, d-1)
 				return
