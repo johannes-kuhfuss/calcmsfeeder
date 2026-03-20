@@ -1,6 +1,6 @@
 module github.com/johannes-kuhfuss/calcmsfeeder
 
-go 1.25.7
+go 1.26.1
 
 require (
 	github.com/joho/godotenv v1.5.1
