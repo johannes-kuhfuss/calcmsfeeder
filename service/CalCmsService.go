@@ -138,7 +138,7 @@ func (s DefaultCalCmsService) FilterEventsFromCalCms() error {
 }
 
 // Login logs into calCms and stores the session cookie for authentication of the upload request
-func (s DefaultCalCmsService) Login(user string, password string) error {
+func (s DefaultCalCmsService) Login(user, password string) error {
 	// POST to https://programm.coloradio.org/agenda/planung/calendar.cgi
 	// Content-Type application/x-www-form-urlencoded
 	// Form data: "user", "password", "authAction:login", "uri:"
