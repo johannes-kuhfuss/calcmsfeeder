@@ -3,9 +3,10 @@ package config
 
 import (
 	"fmt"
-	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/johannes-kuhfuss/calcmsfeeder/domain"
@@ -20,6 +21,8 @@ type AppConfig struct {
 		CmsUser               string            `envconfig:"CALCMS_USER"`
 		CmsPass               string            `envconfig:"CALCMS_PASS"`
 		Template              string            `envconfig:"CALCMS_TEMPLATE" default:"event.json-p"`
+		ProjectID             int               `envconfig:"CALCMS_PROJECT_ID" default:"1"`
+		StudioID              int               `envconfig:"CALCMS_STUDIO_ID" default:"1"`
 		DefaultDurationInDays int               `envconfig:"DEFAULT_DURATION_IN_DAYS" default:"7"`
 		MaxDurationInDays     int               `envconfig:"MAX_DURATION_IN_DAYS" default:"60"`
 		SeriesFiles           map[string]string `envconfig:"SERIES_FILES"`
@@ -39,37 +42,81 @@ var (
 // InitConfig initializes the configuration and sets the defaults
 func InitConfig(file string, config *AppConfig) error {
 	if err := loadConfig(file); err != nil {
-		return fmt.Errorf("could not load configuration from file: %v", err.Error())
+		return fmt.Errorf("load configuration from file: %w", err)
 	}
 	if err := envconfig.Process("", config); err != nil {
-		return fmt.Errorf("could not initialize configuration: %v", err.Error())
+		return fmt.Errorf("initialize configuration: %w", err)
 	}
-	setDefaults(config)
-	return nil
+	return validateAndBuildRuntime(config, filepath.Dir(file))
 }
 
-// cleanFilePath does sanity-checking on file paths
-func checkFilePath(filePath *string) {
-	if *filePath != "" {
-		*filePath = filepath.Clean(*filePath)
-		_, err := os.Stat(*filePath)
-		if err == nil {
-			*filePath, err = filepath.EvalSymlinks(*filePath)
-			if err != nil {
-				log.Printf("error checking file %v", *filePath)
-			}
-		}
+// checkFilePath validates and resolves an upload file path.
+func checkFilePath(filePath, baseDir string) (string, error) {
+	if strings.TrimSpace(filePath) == "" {
+		return "", fmt.Errorf("file path is empty")
 	}
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(baseDir, filePath)
+	}
+	filePath = filepath.Clean(filePath)
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("not a regular file")
+	}
+	resolved, err := filepath.EvalSymlinks(filePath)
+	if err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
-// setDefaults sets defaults for some configurations items
-func setDefaults(config *AppConfig) {
+func validateAndBuildRuntime(config *AppConfig, baseDir string) error {
+	if config == nil {
+		return fmt.Errorf("configuration is nil")
+	}
+	host, err := url.Parse(config.CalCms.CmsHost)
+	if err != nil || host.Host == "" {
+		return fmt.Errorf("CALCMS_HOST must be a valid absolute URL")
+	}
+	if host.Scheme != "https" {
+		return fmt.Errorf("CALCMS_HOST must use https")
+	}
+	if config.CalCms.CmsUser == "" || config.CalCms.CmsPass == "" {
+		return fmt.Errorf("CALCMS_USER and CALCMS_PASS are required")
+	}
+	if config.CalCms.Template == "" {
+		return fmt.Errorf("CALCMS_TEMPLATE must not be empty")
+	}
+	if config.CalCms.ProjectID < 1 || config.CalCms.StudioID < 1 {
+		return fmt.Errorf("CALCMS_PROJECT_ID and CALCMS_STUDIO_ID must be positive")
+	}
+	if config.CalCms.DefaultDurationInDays < 1 || config.CalCms.MaxDurationInDays < 1 || config.CalCms.DefaultDurationInDays > config.CalCms.MaxDurationInDays {
+		return fmt.Errorf("duration defaults must satisfy 1 <= default <= maximum")
+	}
+	if len(config.CalCms.SeriesFiles) == 0 {
+		return fmt.Errorf("SERIES_FILES must contain at least one entry")
+	}
 	config.RunTime.Series = make(map[string]domain.SeriesInfo)
 	for skey, file := range config.CalCms.SeriesFiles {
-		checkFilePath(&file)
-		seriesid := config.CalCms.SeriesIds[skey]
+		seriesid, ok := config.CalCms.SeriesIds[skey]
+		if !ok || seriesid < 1 {
+			return fmt.Errorf("SERIES_IDS must contain a positive ID for %q", skey)
+		}
+		file, err = checkFilePath(file, baseDir)
+		if err != nil {
+			return fmt.Errorf("invalid upload file for %q: %w", skey, err)
+		}
 		config.RunTime.Series[skey] = domain.SeriesInfo{FileToUpload: file, SeriesId: seriesid}
 	}
+	for skey := range config.CalCms.SeriesIds {
+		if _, ok := config.CalCms.SeriesFiles[skey]; !ok {
+			return fmt.Errorf("SERIES_IDS contains %q without a matching file", skey)
+		}
+	}
+	return nil
 }
 
 // loadConfig loads the configuration from file. Returns an error if loading fails

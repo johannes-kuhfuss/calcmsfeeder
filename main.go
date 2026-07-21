@@ -1,7 +1,13 @@
 package main
 
-import "github.com/johannes-kuhfuss/calcmsfeeder/app"
+import (
+	"log"
+
+	"github.com/johannes-kuhfuss/calcmsfeeder/app"
+)
 
 func main() {
-	app.RunApp()
+	if err := app.RunApp(); err != nil {
+		log.Fatal(err)
+	}
 }

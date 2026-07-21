@@ -2,17 +2,17 @@
 package service
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/johannes-kuhfuss/calcmsfeeder/config"
@@ -28,56 +28,34 @@ type CalCmsService interface {
 
 // The calCms service handles all the communication with calCms and the necessary data transformation
 type DefaultCalCmsService struct {
-	Cfg *config.AppConfig
-}
-
-var (
-	httpCalTr     http.Transport
-	httpCalClient http.Client
-	CalCmsPgm     struct {
-		sync.RWMutex
-		data domain.CalCmsPgmData
-	}
-	sessionCookie *http.Cookie
-)
-
-// InitHttpCalClient sets the default values for the http client used to query calCms
-func InitHttpCalClient() {
-	httpCalTr = http.Transport{
-		DisableKeepAlives:  false,
-		DisableCompression: false,
-		MaxIdleConns:       0,
-		IdleConnTimeout:    0,
-	}
-	httpCalClient = http.Client{
-		Transport: &httpCalTr,
-		Timeout:   5 * time.Second,
-	}
+	Cfg    *config.AppConfig
+	client *http.Client
+	events domain.CalCmsPgmData
 }
 
 // NewCalCmsService creates a new calCms service and injects its dependencies
-func NewCalCmsService(cfg *config.AppConfig) DefaultCalCmsService {
-	InitHttpCalClient()
-	return DefaultCalCmsService{
-		Cfg: cfg,
-	}
+func NewCalCmsService(cfg *config.AppConfig) *DefaultCalCmsService {
+	return NewCalCmsServiceWithClient(cfg, nil)
 }
 
-// insertData inserts new calCms data in a thread-safe manner
-func (s DefaultCalCmsService) insertData(data domain.CalCmsPgmData) {
-	CalCmsPgm.Lock()
-	CalCmsPgm.data = data
-	CalCmsPgm.Unlock()
+// NewCalCmsServiceWithClient creates a service with an injected HTTP client.
+func NewCalCmsServiceWithClient(cfg *config.AppConfig, client *http.Client) *DefaultCalCmsService {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	if client.Jar == nil {
+		client.Jar, _ = cookiejar.New(nil)
+	}
+	return &DefaultCalCmsService{Cfg: cfg, client: client}
 }
 
 // getCalCmsEventData retrieves the event information from calCms
-func (s DefaultCalCmsService) getCalCmsEventData() (eventData []byte, e error) {
+func (s *DefaultCalCmsService) getCalCmsEventData() ([]byte, error) {
 	//API doc: https://github.com/rapilodev/racalmas/blob/master/docs/event-api.md
 	//URL: https://programm.coloradio.org/agenda/events.cgi?from_date=2024-10-04&from_time=00:00&till_date=2024-10-05&till_time=00:00&template=event.json-p
 	calUrl, err := url.Parse(s.Cfg.CalCms.CmsHost)
 	if err != nil {
-		e := fmt.Errorf("Cannot parse calCMS Url: %v", err)
-		return nil, e
+		return nil, fmt.Errorf("parse calCMS URL: %w", err)
 	}
 	calUrl = calUrl.JoinPath("agenda/events.cgi")
 	query := url.Values{}
@@ -87,49 +65,46 @@ func (s DefaultCalCmsService) getCalCmsEventData() (eventData []byte, e error) {
 	query.Add("till_time", "23:55")
 	query.Add("template", s.Cfg.CalCms.Template)
 	calUrl.RawQuery = query.Encode()
-	req, err := http.NewRequest("GET", calUrl.String(), nil)
+	req, err := http.NewRequest(http.MethodGet, calUrl.String(), nil)
 	if err != nil {
-		e := fmt.Errorf("Cannot build calCMS http request: %v", err)
-		return nil, e
+		return nil, fmt.Errorf("build calCMS HTTP request: %w", err)
 	}
-	resp, err := httpCalClient.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
-		e := fmt.Errorf("Cannot execute calCMS http request: %v", err)
-		return nil, e
-	}
-	if resp.StatusCode != http.StatusOK {
-		e := fmt.Errorf("Received status code %v from calCMS.", resp.StatusCode)
-		return nil, e
+		return nil, fmt.Errorf("execute calCMS HTTP request: %w", err)
 	}
 	defer resp.Body.Close()
-	eventData, err = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("calCMS returned HTTP %d", resp.StatusCode)
+	}
+	eventData, err := io.ReadAll(resp.Body)
 	if err != nil {
-		e := fmt.Errorf("Cannot read response data from calCMS: %v", err)
-		return nil, e
+		return nil, fmt.Errorf("read calCMS response: %w", err)
 	}
 	return eventData, nil
 }
 
 // QueryEventsFromCalCms retries all events from calCms and stores the resulting data for further access
-func (s DefaultCalCmsService) QueryEventsFromCalCms() error {
+func (s *DefaultCalCmsService) QueryEventsFromCalCms() error {
 	data, err := s.getCalCmsEventData()
 	if err != nil {
-		e := fmt.Errorf("error getting data from calCms: %v", err)
-		return e
+		return fmt.Errorf("get event data: %w", err)
 	}
-	CalCmsPgm.Lock()
-	if err := json.Unmarshal(data, &CalCmsPgm.data); err != nil {
-		e := fmt.Errorf("Cannot convert calCMS response data to Json: %v", err)
-		return e
+	var events domain.CalCmsPgmData
+	if err := json.Unmarshal(data, &events); err != nil {
+		return fmt.Errorf("decode calCMS response: %w", err)
 	}
-	CalCmsPgm.Unlock()
+	s.events = events
 	return nil
 }
 
 // FilterEventsFromCalCms extracts all events that match the configured series and stores them in the runtime configuration
-func (s DefaultCalCmsService) FilterEventsFromCalCms() error {
-	for _, event := range CalCmsPgm.data.Events {
-		//fmt.Printf("Event Skey: %v, Title: %v, ID: %v\r\n", event.Skey, event.Title, event.EventID)
+func (s *DefaultCalCmsService) FilterEventsFromCalCms() error {
+	for key, entry := range s.Cfg.RunTime.Series {
+		entry.EventIds = nil
+		s.Cfg.RunTime.Series[key] = entry
+	}
+	for _, event := range s.events.Events {
 		if entry, ok := s.Cfg.RunTime.Series[event.Skey]; ok {
 			entry.EventIds = append(entry.EventIds, event.EventID)
 			s.Cfg.RunTime.Series[event.Skey] = entry
@@ -139,108 +114,115 @@ func (s DefaultCalCmsService) FilterEventsFromCalCms() error {
 }
 
 // Login logs into calCms and stores the session cookie for authentication of the upload request
-func (s DefaultCalCmsService) Login(user, password string) error {
+func (s *DefaultCalCmsService) Login(user, password string) error {
 	// POST to https://programm.coloradio.org/agenda/planung/calendar.cgi
 	// Content-Type application/x-www-form-urlencoded
 	// Form data: "user", "password", "authAction:login", "uri:"
 	// Return session cookie
 	calUrl, err := url.Parse(s.Cfg.CalCms.CmsHost)
 	if err != nil {
-		e := fmt.Errorf("Cannot parse calCMS Url: %v", err)
-		return e
+		return fmt.Errorf("parse calCMS URL: %w", err)
 	}
 	calUrl = calUrl.JoinPath("agenda/planung/calendar.cgi")
-	query := url.Values{}
-	query.Add("user", user)
-	query.Add("password", password)
-	query.Add("authAction", "login")
-	query.Add("uri", "")
-	calUrl.RawQuery = query.Encode()
-	req, err := http.NewRequest("POST", calUrl.String(), nil)
+	form := url.Values{}
+	form.Add("user", user)
+	form.Add("password", password)
+	form.Add("authAction", "login")
+	form.Add("uri", "")
+	req, err := http.NewRequest(http.MethodPost, calUrl.String(), strings.NewReader(form.Encode()))
 	if err != nil {
-		e := fmt.Errorf("Cannot build calCMS http request: %v", err)
-		return e
+		return fmt.Errorf("build calCMS HTTP request: %w", err)
 	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := httpCalClient.Do(req)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := s.client.Do(req)
 	if err != nil {
-		e := fmt.Errorf("Cannot execute calCMS http request: %v", err)
-		return e
-	}
-	if resp.StatusCode != http.StatusOK {
-		e := fmt.Errorf("Received status code %v from calCMS.", resp.StatusCode)
-		return e
+		return fmt.Errorf("execute calCMS login request: %w", err)
 	}
 	defer resp.Body.Close()
-	cookies := resp.Cookies()
-	if len(cookies) != 1 {
-		e := fmt.Errorf("Cannot authenticate - no cookie.")
-		return e
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("calCMS login returned HTTP %d", resp.StatusCode)
 	}
-	sessionCookie = cookies[0]
+	uploadURL := calUrl.ResolveReference(&url.URL{Path: "audio-recordings.cgi"})
+	if len(s.client.Jar.Cookies(uploadURL)) == 0 {
+		return fmt.Errorf("calCMS login returned no session cookie")
+	}
 	return nil
 }
 
 // UploadFile uploads a specified file to a specified event in a series
-func (s DefaultCalCmsService) UploadFile(eventId int, seriesId int, uploadFile string) error {
+func (s *DefaultCalCmsService) UploadFile(eventId int, seriesId int, uploadFile string) error {
 	// Upload Page: https://programm.coloradio.org/agenda/planung/audio-recordings.cgi?project_id=1&studio_id=1&series_id=395&event_id=37901
 	// POST request
 	// Cookie set sessionID
 	// Content-Type multipart/form-data (boundary)
-	var (
-		body bytes.Buffer
-	)
 	calUrl, err := url.Parse(s.Cfg.CalCms.CmsHost)
 	if err != nil {
-		e := fmt.Errorf("Cannot parse calCMS Url: %v", err)
-		return e
+		return fmt.Errorf("parse calCMS URL: %w", err)
 	}
 	calUrl = calUrl.JoinPath("agenda/planung/audio-recordings.cgi")
 	file, err := os.Open(uploadFile)
 	if err != nil {
-		e := fmt.Errorf("Cannot open upload file: %v", err)
-		return e
+		return fmt.Errorf("open upload file: %w", err)
 	}
-	defer file.Close()
-	fileContents, err := io.ReadAll(file)
+	reader, writer := io.Pipe()
+	multipartWriter := multipart.NewWriter(writer)
+	req, err := http.NewRequest(http.MethodPost, calUrl.String(), reader)
 	if err != nil {
-		e := fmt.Errorf("Cannot read upload file: %v", err)
-		return e
+		file.Close()
+		reader.Close()
+		writer.Close()
+		return fmt.Errorf("build calCMS HTTP request: %w", err)
 	}
-	w := multipart.NewWriter(&body)
-	defer w.Close()
-	w.WriteField("project_id", "1")
-	w.WriteField("studio_id=1", "1")
-	w.WriteField("series_id", strconv.Itoa(seriesId))
-	w.WriteField("event_id", strconv.Itoa(eventId))
-	w.WriteField("action", "upload")
-	fw, err := w.CreateFormFile("upload", filepath.Base(uploadFile))
+	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	writeDone := make(chan error, 1)
+	go func() {
+		defer file.Close()
+		writeErr := writeMultipartUpload(multipartWriter, file, s.Cfg.CalCms.ProjectID, s.Cfg.CalCms.StudioID, eventId, seriesId, uploadFile)
+		if writeErr != nil {
+			writer.CloseWithError(writeErr)
+		} else {
+			writer.Close()
+		}
+		writeDone <- writeErr
+	}()
+	resp, err := s.client.Do(req)
 	if err != nil {
-		e := fmt.Errorf("Cannot setup form file: %v", err)
-		return e
-	}
-	fw.Write(fileContents)
-	err = w.Close()
-	if err != nil {
-		e := fmt.Errorf("Cannot close writer: %v", err)
-		return e
-	}
-	req, err := http.NewRequest("POST", calUrl.String(), &body)
-	if err != nil {
-		e := fmt.Errorf("Cannot build calCMS http request: %v", err)
-		return e
-	}
-	req.Header.Add("Content-Type", w.FormDataContentType())
-	req.AddCookie(sessionCookie)
-	resp, err := httpCalClient.Do(req)
-	if err != nil {
-		e := fmt.Errorf("Cannot execute calCMS http request: %v", err)
-		return e
-	}
-	if resp.StatusCode != http.StatusOK {
-		e := fmt.Errorf("Received status code %v from calCMS.", resp.StatusCode)
-		return e
+		reader.CloseWithError(err)
+		<-writeDone
+		return fmt.Errorf("execute calCMS upload request: %w", err)
 	}
 	defer resp.Body.Close()
+	if err := <-writeDone; err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("calCMS upload returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func writeMultipartUpload(w *multipart.Writer, file io.Reader, projectID, studioID, eventID, seriesID int, uploadFile string) error {
+	fields := map[string]string{
+		"project_id": strconv.Itoa(projectID),
+		"studio_id":  strconv.Itoa(studioID),
+		"series_id":  strconv.Itoa(seriesID),
+		"event_id":   strconv.Itoa(eventID),
+		"action":     "upload",
+	}
+	for name, value := range fields {
+		if err := w.WriteField(name, value); err != nil {
+			return fmt.Errorf("write multipart field %q: %w", name, err)
+		}
+	}
+	part, err := w.CreateFormFile("upload", filepath.Base(uploadFile))
+	if err != nil {
+		return fmt.Errorf("create multipart file: %w", err)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		return fmt.Errorf("write multipart file: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return fmt.Errorf("close multipart writer: %w", err)
+	}
 	return nil
 }

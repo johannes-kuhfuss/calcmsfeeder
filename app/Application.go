@@ -5,9 +5,10 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"log"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/johannes-kuhfuss/calcmsfeeder/config"
@@ -16,7 +17,7 @@ import (
 
 var (
 	cfg           config.AppConfig
-	calCmsService service.DefaultCalCmsService
+	calCmsService service.CalCmsService
 )
 
 const (
@@ -24,19 +25,28 @@ const (
 )
 
 // RunApp orchestrates the application
-func RunApp() {
+func RunApp() error {
 	getCmdLine()
-	err := config.InitConfig(config.EnvFile, &cfg)
-	if err != nil {
-		panic(err)
+	if err := config.InitConfig(config.EnvFile, &cfg); err != nil {
+		return err
 	}
 	wireApp()
-	getUserInput()
-	queryCalCmsEvents()
-	confirmed := showStatusAndConfirm()
-	if confirmed {
-		uploadFilesToCalCms()
+	if err := getUserInput(); err != nil {
+		return err
 	}
+	if err := queryCalCmsEvents(); err != nil {
+		return err
+	}
+	confirmed, err := showStatusAndConfirm()
+	if err != nil {
+		return err
+	}
+	if confirmed {
+		if err := uploadFilesToCalCms(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // getCmdLine checks the command line arguments
@@ -51,15 +61,15 @@ func wireApp() {
 }
 
 // getUserInput retrieves the dates to work on
-func getUserInput() {
-	readStartDate()
-	readDuration()
-	//cfg.RunTime.StartDate = time.Date(time.Now().Year(), time.Now().Month(), 27, 0, 0, 0, 0, time.Local)
-	//cfg.RunTime.EndDate = cfg.RunTime.StartDate.AddDate(0, 0, 1)
+func getUserInput() error {
+	if err := readStartDate(); err != nil {
+		return err
+	}
+	return readDuration()
 }
 
 // readStartDate prompts the user for the start date
-func readStartDate() {
+func readStartDate() error {
 	var (
 		dateOk    bool = false
 		startDate string
@@ -69,18 +79,19 @@ func readStartDate() {
 	today = time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.Local)
 	for !dateOk {
 		fmt.Print("Enter start date as YYYY-MM-DD (or leave empty for today): ")
-		scanner.Scan()
-		err := scanner.Err()
-		if err != nil {
-			log.Fatal(err)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("read start date: %w", err)
+			}
+			return fmt.Errorf("read start date: input closed")
 		}
 		startDate = scanner.Text()
 		if startDate == "" {
 			cfg.RunTime.StartDate = today
 			dateOk = true
-			return
+			return nil
 		}
-		d, err := time.Parse(dateFormat, startDate)
+		d, err := time.ParseInLocation(dateFormat, startDate, time.Local)
 		if err != nil {
 			fmt.Println("Start Date must be entered as YYYY-MM-DD.")
 		} else {
@@ -89,14 +100,15 @@ func readStartDate() {
 			} else {
 				cfg.RunTime.StartDate = d
 				dateOk = true
-				return
+				return nil
 			}
 		}
 	}
+	return nil
 }
 
 // readDuration prompts the user for the duration in number of days
-func readDuration() {
+func readDuration() error {
 	var (
 		durOk    bool = false
 		duration string
@@ -104,15 +116,16 @@ func readDuration() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for !durOk {
 		fmt.Printf("Enter processing duration in days (1 .. %v, or leave empty for default = %v): ", cfg.CalCms.MaxDurationInDays, cfg.CalCms.DefaultDurationInDays)
-		scanner.Scan()
-		err := scanner.Err()
-		if err != nil {
-			log.Fatal(err)
+		if !scanner.Scan() {
+			if err := scanner.Err(); err != nil {
+				return fmt.Errorf("read duration: %w", err)
+			}
+			return fmt.Errorf("read duration: input closed")
 		}
 		duration = scanner.Text()
 		if duration == "" {
-			cfg.RunTime.EndDate = cfg.RunTime.StartDate.AddDate(0, 0, cfg.CalCms.DefaultDurationInDays)
-			return
+			cfg.RunTime.EndDate = endDateForDuration(cfg.RunTime.StartDate, cfg.CalCms.DefaultDurationInDays)
+			return nil
 		}
 		d, err := strconv.Atoi(duration)
 		if err != nil {
@@ -121,60 +134,89 @@ func readDuration() {
 			if (d < 1) || (d > cfg.CalCms.MaxDurationInDays) {
 				fmt.Printf("Duration must be between 1 and %v.\r\n", cfg.CalCms.MaxDurationInDays)
 			} else {
-				cfg.RunTime.EndDate = cfg.RunTime.StartDate.AddDate(0, 0, d-1)
-				return
+				cfg.RunTime.EndDate = endDateForDuration(cfg.RunTime.StartDate, d)
+				return nil
 			}
 		}
 	}
+	return nil
 }
 
-func showStatusAndConfirm() bool {
+func endDateForDuration(start time.Time, days int) time.Time {
+	return start.AddDate(0, 0, days-1)
+}
+
+func showStatusAndConfirm() (bool, error) {
 	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format(dateFormat))
 	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format(dateFormat))
-	for entry, data := range cfg.RunTime.Series {
+	for _, entry := range sortedSeriesKeys() {
+		data := cfg.RunTime.Series[entry]
 		fmt.Printf("For \"%v\" found %v entries. Will upload file \"%v\". (IDs: %v)\r\n", entry, len(data.EventIds), data.FileToUpload, data.EventIds)
 	}
 	scanner := bufio.NewScanner(os.Stdin)
 	fmt.Print("Confirm with \"y\" to continue: ")
-	scanner.Scan()
-	err := scanner.Err()
-	if err != nil {
-		log.Fatal(err)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return false, fmt.Errorf("read confirmation: %w", err)
+		}
+		return false, fmt.Errorf("read confirmation: input closed")
 	}
-	decision := scanner.Text()
-	if decision != "y" {
+	decision := strings.TrimSpace(scanner.Text())
+	if !strings.EqualFold(decision, "y") {
 		fmt.Print("Aborting...")
-		return false
+		return false, nil
 	}
-	return true
+	return true, nil
 }
 
-// queryCalCmsEvents retrives all events for the date range from calCms and filters them to match the series configuration
-func queryCalCmsEvents() {
-	err := calCmsService.QueryEventsFromCalCms()
-	if err != nil {
-		fmt.Printf("Error while querying events from calCms: %v", err.Error())
+// queryCalCmsEvents retrieves all events for the date range from calCms and filters them to match the series configuration
+func queryCalCmsEvents() error {
+	if err := calCmsService.QueryEventsFromCalCms(); err != nil {
+		return fmt.Errorf("query events from calCms: %w", err)
 	}
-	err = calCmsService.FilterEventsFromCalCms()
-	if err != nil {
-		fmt.Printf("Error while filtering events from calCms: %v", err.Error())
+	if err := calCmsService.FilterEventsFromCalCms(); err != nil {
+		return fmt.Errorf("filter events from calCms: %w", err)
 	}
+	return nil
 }
 
 // uploadFilesToCalCms uploads the configured file to calCms for each matching event
-func uploadFilesToCalCms() {
-	for entry, data := range cfg.RunTime.Series {
-		fmt.Printf("Uploading files for \"%v\".\r\n", entry)
-		err := calCmsService.Login(cfg.CalCms.CmsUser, cfg.CalCms.CmsPass)
-		if err != nil {
-			fmt.Printf("Error while logging into calCms: %v", err.Error())
-			return
+func uploadFilesToCalCms() error {
+	if eventCount() == 0 {
+		fmt.Println("No matching events; nothing to upload.")
+		return nil
+	}
+	if err := calCmsService.Login(cfg.CalCms.CmsUser, cfg.CalCms.CmsPass); err != nil {
+		return fmt.Errorf("log in to calCms: %w", err)
+	}
+	for _, entry := range sortedSeriesKeys() {
+		data := cfg.RunTime.Series[entry]
+		if len(data.EventIds) == 0 {
+			continue
 		}
+		fmt.Printf("Uploading files for \"%v\".\r\n", entry)
 		for _, evId := range data.EventIds {
-			err := calCmsService.UploadFile(evId, data.SeriesId, data.FileToUpload)
-			if err != nil {
-				fmt.Printf("Error uploading file to calCms: %v", err.Error())
+			if err := calCmsService.UploadFile(evId, data.SeriesId, data.FileToUpload); err != nil {
+				return fmt.Errorf("upload %q for event %d: %w", data.FileToUpload, evId, err)
 			}
 		}
 	}
+	return nil
+}
+
+func sortedSeriesKeys() []string {
+	keys := make([]string, 0, len(cfg.RunTime.Series))
+	for key := range cfg.RunTime.Series {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func eventCount() int {
+	count := 0
+	for _, data := range cfg.RunTime.Series {
+		count += len(data.EventIds)
+	}
+	return count
 }
