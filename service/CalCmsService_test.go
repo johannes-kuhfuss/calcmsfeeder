@@ -115,6 +115,9 @@ func TestLoginAndUploadProtocol(t *testing.T) {
 				io.WriteString(w, `<table><tr class="active"><td>existing.stream</td></tr></table>`)
 				return
 			}
+			if r.ContentLength <= 0 || len(r.TransferEncoding) != 0 {
+				t.Errorf("upload framing: Content-Length=%d Transfer-Encoding=%v", r.ContentLength, r.TransferEncoding)
+			}
 			if err := r.ParseMultipartForm(1 << 20); err != nil {
 				t.Errorf("parse upload: %v", err)
 				return
@@ -138,6 +141,7 @@ func TestLoginAndUploadProtocol(t *testing.T) {
 			if string(contents) != "audio stream" {
 				t.Errorf("upload contents = %q", contents)
 			}
+			io.WriteString(w, `<!-- <div class="oky" id="message">done!</div> -->`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -157,6 +161,25 @@ func TestLoginAndUploadProtocol(t *testing.T) {
 	}
 	if err := svc.UploadFile(42, 99, uploadFile); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUploadSurfacesCalCMSErrorResponse(t *testing.T) {
+	uploadFile := t.TempDir() + "/show.stream"
+	if err := os.WriteFile(uploadFile, []byte("audio stream"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Errorf("parse upload: %v", err)
+		}
+		io.WriteString(w, `<!-- <div class="error" id="message">Could not get file handle</div> -->`)
+	}))
+	defer server.Close()
+	svc := NewCalCmsServiceWithClient(serviceTestConfig(server.URL), server.Client())
+	err := svc.UploadFile(42, 99, uploadFile)
+	if err == nil || !strings.Contains(err.Error(), "Could not get file handle") {
+		t.Fatalf("UploadFile() error = %v, want server error", err)
 	}
 }
 

@@ -4,6 +4,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -29,7 +30,11 @@ type CalCmsService interface {
 	UploadFile(int, int, string) error
 }
 
-var activeRecordingRow = regexp.MustCompile(`(?i)<tr[^>]*class\s*=\s*["'][^"']*\bactive\b[^"']*["']`)
+var (
+	activeRecordingRow = regexp.MustCompile(`(?i)<tr[^>]*class\s*=\s*["'][^"']*\bactive\b[^"']*["']`)
+	uploadErrorRow     = regexp.MustCompile(`(?is)<div\s+class=["']error["']\s+id=["']message["'][^>]*>(.*?)</div>`)
+	htmlTag            = regexp.MustCompile(`(?s)<[^>]+>`)
+)
 
 // The calCms service handles all the communication with calCms and the necessary data transformation
 type DefaultCalCmsService struct {
@@ -213,6 +218,11 @@ func (s *DefaultCalCmsService) UploadFile(eventId int, seriesId int, uploadFile 
 	if err != nil {
 		return fmt.Errorf("open upload file: %w", err)
 	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return fmt.Errorf("inspect upload file: %w", err)
+	}
 	reader, writer := io.Pipe()
 	multipartWriter := multipart.NewWriter(writer)
 	req, err := http.NewRequest(http.MethodPost, calUrl.String(), reader)
@@ -223,6 +233,14 @@ func (s *DefaultCalCmsService) UploadFile(eventId int, seriesId int, uploadFile 
 		return fmt.Errorf("build calCMS HTTP request: %w", err)
 	}
 	req.Header.Set("Content-Type", multipartWriter.FormDataContentType())
+	contentLength, err := multipartUploadLength(multipartWriter.Boundary(), fileInfo.Size(), s.Cfg.CalCms.ProjectID, s.Cfg.CalCms.StudioID, eventId, seriesId, uploadFile)
+	if err != nil {
+		file.Close()
+		reader.Close()
+		writer.Close()
+		return fmt.Errorf("calculate upload size: %w", err)
+	}
+	req.ContentLength = contentLength
 	writeDone := make(chan error, 1)
 	go func() {
 		defer file.Close()
@@ -247,7 +265,39 @@ func (s *DefaultCalCmsService) UploadFile(eventId int, seriesId int, uploadFile 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("calCMS upload returned HTTP %d", resp.StatusCode)
 	}
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return fmt.Errorf("read calCMS upload response: %w", err)
+	}
+	if match := uploadErrorRow.FindSubmatch(responseBody); len(match) == 2 {
+		message := strings.TrimSpace(html.UnescapeString(htmlTag.ReplaceAllString(string(match[1]), " ")))
+		if message == "" {
+			message = "unknown server-side error"
+		}
+		return fmt.Errorf("calCMS rejected upload: %s", message)
+	}
 	return nil
+}
+
+type countingWriter struct {
+	n int64
+}
+
+func (w *countingWriter) Write(data []byte) (int, error) {
+	w.n += int64(len(data))
+	return len(data), nil
+}
+
+func multipartUploadLength(boundary string, fileSize int64, projectID, studioID, eventID, seriesID int, uploadFile string) (int64, error) {
+	counter := &countingWriter{}
+	w := multipart.NewWriter(counter)
+	if err := w.SetBoundary(boundary); err != nil {
+		return 0, err
+	}
+	if err := writeMultipartUpload(w, strings.NewReader(""), projectID, studioID, eventID, seriesID, uploadFile); err != nil {
+		return 0, err
+	}
+	return counter.n + fileSize, nil
 }
 
 func writeMultipartUpload(w *multipart.Writer, file io.Reader, projectID, studioID, eventID, seriesID int, uploadFile string) error {
