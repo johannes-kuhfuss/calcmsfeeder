@@ -18,6 +18,7 @@ import (
 var (
 	cfg           config.AppConfig
 	calCmsService service.CalCmsService
+	overwrite     bool
 )
 
 const (
@@ -52,6 +53,7 @@ func RunApp() error {
 // getCmdLine checks the command line arguments
 func getCmdLine() {
 	flag.StringVar(&config.EnvFile, "config.file", ".env", "Specify location of config file. Default is .env")
+	flag.BoolVar(&overwrite, "overwrite", false, "Replace an active recording when an upload is already present")
 	flag.Parse()
 }
 
@@ -149,6 +151,7 @@ func endDateForDuration(start time.Time, days int) time.Time {
 func showStatusAndConfirm() (bool, error) {
 	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format(dateFormat))
 	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format(dateFormat))
+	fmt.Printf("Overwrite existing recordings: %v\r\n", overwrite)
 	for _, entry := range sortedSeriesKeys() {
 		data := cfg.RunTime.Series[entry]
 		fmt.Printf("For \"%v\" found %v entries. Will upload file \"%v\". (IDs: %v)\r\n", entry, len(data.EventIds), data.FileToUpload, data.EventIds)
@@ -196,6 +199,17 @@ func uploadFilesToCalCms() error {
 		}
 		fmt.Printf("Uploading files for \"%v\".\r\n", entry)
 		for _, evId := range data.EventIds {
+			hasRecording, err := calCmsService.HasRecording(evId, data.SeriesId)
+			if err != nil {
+				return fmt.Errorf("check existing recording for event %d: %w", evId, err)
+			}
+			if hasRecording && !overwrite {
+				fmt.Printf("Skipping event %d: an active recording is already present (use -overwrite to replace it).\r\n", evId)
+				continue
+			}
+			if hasRecording {
+				fmt.Printf("Overwriting active recording for event %d.\r\n", evId)
+			}
 			if err := calCmsService.UploadFile(evId, data.SeriesId, data.FileToUpload); err != nil {
 				return fmt.Errorf("upload %q for event %d: %w", data.FileToUpload, evId, err)
 			}

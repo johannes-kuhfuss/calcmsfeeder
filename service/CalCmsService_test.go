@@ -158,6 +158,43 @@ func TestLoginRequiresSessionCookie(t *testing.T) {
 	}
 }
 
+func TestHasRecording(t *testing.T) {
+	tests := []struct {
+		name string
+		html string
+		want bool
+	}{
+		{name: "active recording", html: `<table><tr class="active"><td>recording.stream</td></tr></table>`, want: true},
+		{name: "inactive recording only", html: `<table><tr class="inactive"><td>old.stream</td></tr></table>`, want: false},
+		{name: "no recordings", html: `<table><tr><th>name</th></tr></table>`, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/agenda/planung/audio-recordings.cgi" {
+					t.Errorf("request = %s %s", r.Method, r.URL.Path)
+				}
+				wantQuery := map[string]string{"project_id": "3", "studio_id": "4", "series_id": "99", "event_id": "42"}
+				for key, want := range wantQuery {
+					if got := r.URL.Query().Get(key); got != want {
+						t.Errorf("query %s = %q, want %q", key, got, want)
+					}
+				}
+				io.WriteString(w, tt.html)
+			}))
+			defer server.Close()
+			svc := NewCalCmsServiceWithClient(serviceTestConfig(server.URL), server.Client())
+			got, err := svc.HasRecording(42, 99)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("HasRecording() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 type closeTrackingBody struct {
 	io.Reader
 	closed atomic.Bool

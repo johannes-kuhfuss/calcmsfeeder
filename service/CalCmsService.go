@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -23,8 +24,11 @@ type CalCmsService interface {
 	QueryEventsFromCalCms() error
 	FilterEventsFromCalCms() error
 	Login(string, string) error
+	HasRecording(int, int) (bool, error)
 	UploadFile(int, int, string) error
 }
+
+var activeRecordingRow = regexp.MustCompile(`(?i)<tr[^>]*class\s*=\s*["'][^"']*\bactive\b[^"']*["']`)
 
 // The calCms service handles all the communication with calCms and the necessary data transformation
 type DefaultCalCmsService struct {
@@ -147,6 +151,41 @@ func (s *DefaultCalCmsService) Login(user, password string) error {
 		return fmt.Errorf("calCMS login returned no session cookie")
 	}
 	return nil
+}
+
+// HasRecording reports whether calCMS already has an active recording for an event.
+func (s *DefaultCalCmsService) HasRecording(eventID, seriesID int) (bool, error) {
+	calURL, err := url.Parse(s.Cfg.CalCms.CmsHost)
+	if err != nil {
+		return false, fmt.Errorf("parse calCMS URL: %w", err)
+	}
+	calURL = calURL.JoinPath("agenda/planung/audio-recordings.cgi")
+	query := url.Values{}
+	query.Set("project_id", strconv.Itoa(s.Cfg.CalCms.ProjectID))
+	query.Set("studio_id", strconv.Itoa(s.Cfg.CalCms.StudioID))
+	query.Set("series_id", strconv.Itoa(seriesID))
+	query.Set("event_id", strconv.Itoa(eventID))
+	calURL.RawQuery = query.Encode()
+	req, err := http.NewRequest(http.MethodGet, calURL.String(), nil)
+	if err != nil {
+		return false, fmt.Errorf("build recording check request: %w", err)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("execute recording check request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("calCMS recording check returned HTTP %d", resp.StatusCode)
+	}
+	if resp.Request != nil && resp.Request != req {
+		return false, fmt.Errorf("calCMS recording check was redirected to %q", resp.Request.URL.Path)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return false, fmt.Errorf("read recording check response: %w", err)
+	}
+	return activeRecordingRow.Match(body), nil
 }
 
 // UploadFile uploads a specified file to a specified event in a series

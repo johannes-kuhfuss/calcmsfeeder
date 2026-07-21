@@ -46,6 +46,14 @@ To select another environment file:
 go run . -config.file ./config/production.env
 ```
 
+If an event already has an active recording, it is skipped by default. Use the
+explicit overwrite flag to upload a replacement and make it the active
+recording. calCMS retains the previous recording as an inactive entry:
+
+```sh
+go run . -overwrite
+```
+
 Enter a start date and an inclusive duration. For example, seven days starting
 on `2026-07-21` processes `2026-07-21` through `2026-07-27`. Press Enter to use
 today and the configured default duration.
