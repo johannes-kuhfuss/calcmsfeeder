@@ -54,6 +54,8 @@ func wireApp() {
 func getUserInput() {
 	readStartDate()
 	readDuration()
+	//cfg.RunTime.StartDate = time.Date(time.Now().Year(), time.Now().Month(), 27, 0, 0, 0, 0, time.Local)
+	//cfg.RunTime.EndDate = cfg.RunTime.StartDate.AddDate(0, 0, 1)
 }
 
 // readStartDate prompts the user for the start date

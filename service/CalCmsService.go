@@ -129,6 +129,7 @@ func (s DefaultCalCmsService) QueryEventsFromCalCms() error {
 // FilterEventsFromCalCms extracts all events that match the configured series and stores them in the runtime configuration
 func (s DefaultCalCmsService) FilterEventsFromCalCms() error {
 	for _, event := range CalCmsPgm.data.Events {
+		//fmt.Printf("Event Skey: %v, Title: %v, ID: %v\r\n", event.Skey, event.Title, event.EventID)
 		if entry, ok := s.Cfg.RunTime.Series[event.Skey]; ok {
 			entry.EventIds = append(entry.EventIds, event.EventID)
 			s.Cfg.RunTime.Series[event.Skey] = entry
