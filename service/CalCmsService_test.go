@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/johannes-kuhfuss/calcmsfeeder/config"
-	"github.com/johannes-kuhfuss/calcmsfeeder/domain"
 )
 
 func serviceTestConfig(host string) *config.AppConfig {
@@ -21,9 +20,6 @@ func serviceTestConfig(host string) *config.AppConfig {
 	cfg.CalCms.Template = "events.json"
 	cfg.CalCms.ProjectID = 3
 	cfg.CalCms.StudioID = 4
-	cfg.RunTime.StartDate = time.Date(2026, time.July, 21, 0, 0, 0, 0, time.UTC)
-	cfg.RunTime.EndDate = time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC)
-	cfg.RunTime.Series = map[string]domain.SeriesInfo{"show": {SeriesId: 99}}
 	return cfg
 }
 
@@ -51,20 +47,12 @@ func TestQueryAndFilterEvents(t *testing.T) {
 
 	cfg := serviceTestConfig(server.URL)
 	svc := NewCalCmsServiceWithClient(cfg, server.Client())
-	if err := svc.QueryEventsFromCalCms(); err != nil {
+	events, err := svc.QueryEvents(time.Date(2026, time.July, 21, 0, 0, 0, 0, time.UTC), time.Date(2026, time.July, 27, 0, 0, 0, 0, time.UTC))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.FilterEventsFromCalCms(); err != nil {
-		t.Fatal(err)
-	}
-	if got := cfg.RunTime.Series["show"].EventIds; len(got) != 1 || got[0] != 42 {
-		t.Fatalf("event IDs = %v, want [42]", got)
-	}
-	if err := svc.FilterEventsFromCalCms(); err != nil {
-		t.Fatal(err)
-	}
-	if got := cfg.RunTime.Series["show"].EventIds; len(got) != 1 {
-		t.Fatalf("second filter duplicated events: %v", got)
+	if len(events) != 2 || events[0].EventID != 42 || events[0].Skey != "show" {
+		t.Fatalf("events = %+v", events)
 	}
 }
 
@@ -79,11 +67,33 @@ func TestMalformedJSONDoesNotPoisonSubsequentQuery(t *testing.T) {
 	}))
 	defer server.Close()
 	svc := NewCalCmsServiceWithClient(serviceTestConfig(server.URL), server.Client())
-	if err := svc.QueryEventsFromCalCms(); err == nil {
+	start, end := time.Now(), time.Now()
+	if _, err := svc.QueryEvents(start, end); err == nil {
 		t.Fatal("first query unexpectedly succeeded")
 	}
-	if err := svc.QueryEventsFromCalCms(); err != nil {
+	if _, err := svc.QueryEvents(start, end); err != nil {
 		t.Fatalf("second query failed: %v", err)
+	}
+}
+
+func TestQueryRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, strings.Repeat("x", (4<<20)+1))
+	}))
+	defer server.Close()
+	svc := NewCalCmsServiceWithClient(serviceTestConfig(server.URL), server.Client())
+	_, err := svc.QueryEvents(time.Now(), time.Now())
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("QueryEvents() error = %v, want response size error", err)
+	}
+}
+
+func TestConfiguredRequestTimeout(t *testing.T) {
+	cfg := serviceTestConfig("https://calendar.example")
+	cfg.CalCms.RequestTimeout = 17 * time.Second
+	svc := NewCalCmsService(cfg)
+	if svc.client.Timeout != 17*time.Second {
+		t.Fatalf("client timeout = %v, want 17s", svc.client.Timeout)
 	}
 }
 
@@ -199,12 +209,48 @@ func TestHasRecordingRejectsAuthenticationRedirect(t *testing.T) {
 	}
 }
 
+func TestUploadRejectsAuthenticationRedirect(t *testing.T) {
+	uploadFile := t.TempDir() + "/show.stream"
+	if err := os.WriteFile(uploadFile, []byte("audio stream"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			io.WriteString(w, "login")
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer server.Close()
+	svc := NewCalCmsServiceWithClient(serviceTestConfig(server.URL), server.Client())
+	err := svc.UploadFile(42, 99, uploadFile)
+	if err == nil || !strings.Contains(err.Error(), "redirected") {
+		t.Fatalf("UploadFile() error = %v, want redirect error", err)
+	}
+}
+
 func TestLoginRequiresSessionCookie(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer server.Close()
 	svc := NewCalCmsServiceWithClient(serviceTestConfig(server.URL), server.Client())
 	if err := svc.Login("alice", "secret"); err == nil || !strings.Contains(err.Error(), "no session cookie") {
 		t.Fatalf("Login() error = %v", err)
+	}
+}
+
+func TestLoginRejectsAuthenticationRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			http.SetCookie(w, &http.Cookie{Name: "visitor", Value: "1", Path: "/"})
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer server.Close()
+	svc := NewCalCmsServiceWithClient(serviceTestConfig(server.URL), server.Client())
+	err := svc.Login("alice", "secret")
+	if err == nil || !strings.Contains(err.Error(), "redirected") {
+		t.Fatalf("Login() error = %v, want redirect error", err)
 	}
 }
 
@@ -265,9 +311,9 @@ func TestNonOKResponseBodyIsClosed(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusBadGateway, Body: body, Header: make(http.Header)}, nil
 	})}
 	svc := NewCalCmsServiceWithClient(serviceTestConfig("http://calendar.example"), client)
-	err := svc.QueryEventsFromCalCms()
+	_, err := svc.QueryEvents(time.Now(), time.Now())
 	if err == nil || !strings.Contains(err.Error(), strconv.Itoa(http.StatusBadGateway)) {
-		t.Fatalf("QueryEventsFromCalCms() error = %v", err)
+		t.Fatalf("QueryEvents() error = %v", err)
 	}
 	if !body.closed.Load() {
 		t.Fatal("response body was not closed")

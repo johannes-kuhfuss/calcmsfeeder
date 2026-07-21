@@ -23,8 +23,7 @@ import (
 )
 
 type CalCmsService interface {
-	QueryEventsFromCalCms() error
-	FilterEventsFromCalCms() error
+	QueryEvents(time.Time, time.Time) ([]domain.CalCMSEvent, error)
 	Login(string, string) error
 	HasRecording(int, int) (bool, error)
 	UploadFile(int, int, string) error
@@ -36,11 +35,12 @@ var (
 	htmlTag            = regexp.MustCompile(`(?s)<[^>]+>`)
 )
 
+const maxResponseSize int64 = 4 << 20
+
 // The calCms service handles all the communication with calCms and the necessary data transformation
 type DefaultCalCmsService struct {
 	Cfg    *config.AppConfig
 	client *http.Client
-	events domain.CalCmsPgmData
 }
 
 // NewCalCmsService creates a new calCms service and injects its dependencies
@@ -51,7 +51,11 @@ func NewCalCmsService(cfg *config.AppConfig) *DefaultCalCmsService {
 // NewCalCmsServiceWithClient creates a service with an injected HTTP client.
 func NewCalCmsServiceWithClient(cfg *config.AppConfig, client *http.Client) *DefaultCalCmsService {
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		timeout := cfg.CalCms.RequestTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		client = &http.Client{Timeout: timeout}
 	}
 	if client.Jar == nil {
 		client.Jar, _ = cookiejar.New(nil)
@@ -60,7 +64,7 @@ func NewCalCmsServiceWithClient(cfg *config.AppConfig, client *http.Client) *Def
 }
 
 // getCalCmsEventData retrieves the event information from calCms
-func (s *DefaultCalCmsService) getCalCmsEventData() ([]byte, error) {
+func (s *DefaultCalCmsService) getCalCmsEventData(startDate, endDate time.Time) ([]byte, error) {
 	//API doc: https://github.com/rapilodev/racalmas/blob/master/docs/event-api.md
 	//URL: https://programm.coloradio.org/agenda/events.cgi?from_date=2024-10-04&from_time=00:00&till_date=2024-10-05&till_time=00:00&template=event.json-p
 	calUrl, err := url.Parse(s.Cfg.CalCms.CmsHost)
@@ -69,9 +73,9 @@ func (s *DefaultCalCmsService) getCalCmsEventData() ([]byte, error) {
 	}
 	calUrl = calUrl.JoinPath("agenda/events.cgi")
 	query := url.Values{}
-	query.Add("from_date", s.Cfg.RunTime.StartDate.Format("2006-01-02"))
+	query.Add("from_date", startDate.Format("2006-01-02"))
 	query.Add("from_time", "00:00")
-	query.Add("till_date", s.Cfg.RunTime.EndDate.Format("2006-01-02"))
+	query.Add("till_date", endDate.Format("2006-01-02"))
 	query.Add("till_time", "23:55")
 	query.Add("template", s.Cfg.CalCms.Template)
 	calUrl.RawQuery = query.Encode()
@@ -87,40 +91,35 @@ func (s *DefaultCalCmsService) getCalCmsEventData() ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("calCMS returned HTTP %d", resp.StatusCode)
 	}
-	eventData, err := io.ReadAll(resp.Body)
+	eventData, err := readLimitedBody(resp.Body, maxResponseSize)
 	if err != nil {
 		return nil, fmt.Errorf("read calCMS response: %w", err)
 	}
 	return eventData, nil
 }
 
-// QueryEventsFromCalCms retries all events from calCms and stores the resulting data for further access
-func (s *DefaultCalCmsService) QueryEventsFromCalCms() error {
-	data, err := s.getCalCmsEventData()
+// QueryEvents retrieves the events in the inclusive date range from calCMS.
+func (s *DefaultCalCmsService) QueryEvents(startDate, endDate time.Time) ([]domain.CalCMSEvent, error) {
+	data, err := s.getCalCmsEventData(startDate, endDate)
 	if err != nil {
-		return fmt.Errorf("get event data: %w", err)
+		return nil, fmt.Errorf("get event data: %w", err)
 	}
-	var events domain.CalCmsPgmData
+	var events domain.CalCMSEventResponse
 	if err := json.Unmarshal(data, &events); err != nil {
-		return fmt.Errorf("decode calCMS response: %w", err)
+		return nil, fmt.Errorf("decode calCMS response: %w", err)
 	}
-	s.events = events
-	return nil
+	return events.Events, nil
 }
 
-// FilterEventsFromCalCms extracts all events that match the configured series and stores them in the runtime configuration
-func (s *DefaultCalCmsService) FilterEventsFromCalCms() error {
-	for key, entry := range s.Cfg.RunTime.Series {
-		entry.EventIds = nil
-		s.Cfg.RunTime.Series[key] = entry
+func readLimitedBody(body io.Reader, maximum int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maximum+1))
+	if err != nil {
+		return nil, err
 	}
-	for _, event := range s.events.Events {
-		if entry, ok := s.Cfg.RunTime.Series[event.Skey]; ok {
-			entry.EventIds = append(entry.EventIds, event.EventID)
-			s.Cfg.RunTime.Series[event.Skey] = entry
-		}
+	if int64(len(data)) > maximum {
+		return nil, fmt.Errorf("response exceeds %d bytes", maximum)
 	}
-	return nil
+	return data, nil
 }
 
 // Login logs into calCms and stores the session cookie for authentication of the upload request
@@ -151,6 +150,9 @@ func (s *DefaultCalCmsService) Login(user, password string) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("calCMS login returned HTTP %d", resp.StatusCode)
+	}
+	if resp.Request == nil || resp.Request.Method != http.MethodPost || !sameEndpoint(resp.Request.URL, calUrl) {
+		return fmt.Errorf("calCMS login was redirected away from the login endpoint")
 	}
 	uploadURL := calUrl.ResolveReference(&url.URL{Path: "audio-recordings.cgi"})
 	if len(s.client.Jar.Cookies(uploadURL)) == 0 {
@@ -187,7 +189,7 @@ func (s *DefaultCalCmsService) HasRecording(eventID, seriesID int) (bool, error)
 	if resp.Request != nil && !sameEndpoint(resp.Request.URL, calURL) {
 		return false, fmt.Errorf("calCMS recording check was redirected to %q", resp.Request.URL.Path)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, err := readLimitedBody(resp.Body, maxResponseSize)
 	if err != nil {
 		return false, fmt.Errorf("read recording check response: %w", err)
 	}
@@ -265,7 +267,14 @@ func (s *DefaultCalCmsService) UploadFile(eventId int, seriesId int, uploadFile 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("calCMS upload returned HTTP %d", resp.StatusCode)
 	}
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.Request == nil || resp.Request.Method != http.MethodPost || !sameEndpoint(resp.Request.URL, calUrl) {
+		redirectPath := "unknown endpoint"
+		if resp.Request != nil && resp.Request.URL != nil {
+			redirectPath = resp.Request.URL.Path
+		}
+		return fmt.Errorf("calCMS upload was redirected to %q", redirectPath)
+	}
+	responseBody, err := readLimitedBody(resp.Body, maxResponseSize)
 	if err != nil {
 		return fmt.Errorf("read calCMS upload response: %w", err)
 	}

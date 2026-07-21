@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func validTestConfig() AppConfig {
@@ -17,8 +18,9 @@ func validTestConfig() AppConfig {
 	cfg.CalCms.StudioID = 1
 	cfg.CalCms.DefaultDurationInDays = 7
 	cfg.CalCms.MaxDurationInDays = 30
+	cfg.CalCms.RequestTimeout = 5 * time.Minute
 	cfg.CalCms.SeriesFiles = map[string]string{"show": "show.stream"}
-	cfg.CalCms.SeriesIds = map[string]int{"show": 42}
+	cfg.CalCms.SeriesIDs = map[string]int{"show": 42}
 	return cfg
 }
 
@@ -29,12 +31,12 @@ func TestValidateAndBuildRuntimeResolvesRelativeFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := validTestConfig()
-	if err := validateAndBuildRuntime(&cfg, dir); err != nil {
-		t.Fatalf("validateAndBuildRuntime() error = %v", err)
+	if err := validateAndBuildSeries(&cfg, dir); err != nil {
+		t.Fatalf("validateAndBuildSeries() error = %v", err)
 	}
-	got := cfg.RunTime.Series["show"]
-	if got.SeriesId != 42 {
-		t.Fatalf("series ID = %d, want 42", got.SeriesId)
+	got := cfg.Series["show"]
+	if got.SeriesID != 42 {
+		t.Fatalf("series ID = %d, want 42", got.SeriesID)
 	}
 	want, err := filepath.EvalSymlinks(file)
 	if err != nil {
@@ -58,14 +60,15 @@ func TestValidateAndBuildRuntimeRejectsUnsafeOrIncompleteConfig(t *testing.T) {
 		{name: "insecure host", mutate: func(c *AppConfig) { c.CalCms.CmsHost = "http://calendar.example" }, want: "must use https"},
 		{name: "missing credentials", mutate: func(c *AppConfig) { c.CalCms.CmsPass = "" }, want: "are required"},
 		{name: "invalid duration", mutate: func(c *AppConfig) { c.CalCms.DefaultDurationInDays = 31 }, want: "1 <= default <= maximum"},
-		{name: "missing series ID", mutate: func(c *AppConfig) { delete(c.CalCms.SeriesIds, "show") }, want: "positive ID"},
+		{name: "invalid request timeout", mutate: func(c *AppConfig) { c.CalCms.RequestTimeout = 0 }, want: "must be positive"},
+		{name: "missing series ID", mutate: func(c *AppConfig) { delete(c.CalCms.SeriesIDs, "show") }, want: "positive ID"},
 		{name: "missing upload file", mutate: func(c *AppConfig) { c.CalCms.SeriesFiles["show"] = "missing.stream" }, want: "invalid upload file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validTestConfig()
 			tt.mutate(&cfg)
-			err := validateAndBuildRuntime(&cfg, dir)
+			err := validateAndBuildSeries(&cfg, dir)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want error containing %q", err, tt.want)
 			}

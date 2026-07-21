@@ -27,12 +27,15 @@ SERIES_FILES="Morning Show:./uploadfiles/morning.stream,Evening Show:./uploadfil
 SERIES_IDS="Morning Show:395,Evening Show:404"
 DEFAULT_DURATION_IN_DAYS=7
 MAX_DURATION_IN_DAYS=30
+CALCMS_REQUEST_TIMEOUT=5m
 ```
 
 `SERIES_FILES` and `SERIES_IDS` must contain exactly the same keys. Relative
 upload paths are resolved relative to the selected configuration file. The
 application rejects missing files, missing IDs, insecure HTTP hosts, empty
 credentials, and invalid duration settings before contacting calCMS.
+`CALCMS_REQUEST_TIMEOUT` limits each complete HTTP request, including an upload,
+and accepts Go duration values such as `30s`, `5m`, or `1h`.
 
 ## Run
 

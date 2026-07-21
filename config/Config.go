@@ -25,19 +25,12 @@ type AppConfig struct {
 		StudioID              int               `envconfig:"CALCMS_STUDIO_ID" default:"1"`
 		DefaultDurationInDays int               `envconfig:"DEFAULT_DURATION_IN_DAYS" default:"7"`
 		MaxDurationInDays     int               `envconfig:"MAX_DURATION_IN_DAYS" default:"60"`
+		RequestTimeout        time.Duration     `envconfig:"CALCMS_REQUEST_TIMEOUT" default:"5m"`
 		SeriesFiles           map[string]string `envconfig:"SERIES_FILES"`
-		SeriesIds             map[string]int    `envconfig:"SERIES_IDS"`
+		SeriesIDs             map[string]int    `envconfig:"SERIES_IDS"`
 	}
-	RunTime struct {
-		StartDate time.Time
-		EndDate   time.Time
-		Series    map[string]domain.SeriesInfo
-	}
+	Series map[string]domain.SeriesInfo `ignored:"true"`
 }
-
-var (
-	EnvFile = ".env"
-)
 
 // InitConfig initializes the configuration and sets the defaults
 func InitConfig(file string, config *AppConfig) error {
@@ -47,7 +40,7 @@ func InitConfig(file string, config *AppConfig) error {
 	if err := envconfig.Process("", config); err != nil {
 		return fmt.Errorf("initialize configuration: %w", err)
 	}
-	return validateAndBuildRuntime(config, filepath.Dir(file))
+	return validateAndBuildSeries(config, filepath.Dir(file))
 }
 
 // checkFilePath validates and resolves an upload file path.
@@ -73,7 +66,7 @@ func checkFilePath(filePath, baseDir string) (string, error) {
 	return resolved, nil
 }
 
-func validateAndBuildRuntime(config *AppConfig, baseDir string) error {
+func validateAndBuildSeries(config *AppConfig, baseDir string) error {
 	if config == nil {
 		return fmt.Errorf("configuration is nil")
 	}
@@ -96,22 +89,25 @@ func validateAndBuildRuntime(config *AppConfig, baseDir string) error {
 	if config.CalCms.DefaultDurationInDays < 1 || config.CalCms.MaxDurationInDays < 1 || config.CalCms.DefaultDurationInDays > config.CalCms.MaxDurationInDays {
 		return fmt.Errorf("duration defaults must satisfy 1 <= default <= maximum")
 	}
+	if config.CalCms.RequestTimeout <= 0 {
+		return fmt.Errorf("CALCMS_REQUEST_TIMEOUT must be positive")
+	}
 	if len(config.CalCms.SeriesFiles) == 0 {
 		return fmt.Errorf("SERIES_FILES must contain at least one entry")
 	}
-	config.RunTime.Series = make(map[string]domain.SeriesInfo)
+	config.Series = make(map[string]domain.SeriesInfo)
 	for skey, file := range config.CalCms.SeriesFiles {
-		seriesid, ok := config.CalCms.SeriesIds[skey]
-		if !ok || seriesid < 1 {
+		seriesID, ok := config.CalCms.SeriesIDs[skey]
+		if !ok || seriesID < 1 {
 			return fmt.Errorf("SERIES_IDS must contain a positive ID for %q", skey)
 		}
 		file, err = checkFilePath(file, baseDir)
 		if err != nil {
 			return fmt.Errorf("invalid upload file for %q: %w", skey, err)
 		}
-		config.RunTime.Series[skey] = domain.SeriesInfo{FileToUpload: file, SeriesId: seriesid}
+		config.Series[skey] = domain.SeriesInfo{FileToUpload: file, SeriesID: seriesID}
 	}
-	for skey := range config.CalCms.SeriesIds {
+	for skey := range config.CalCms.SeriesIDs {
 		if _, ok := config.CalCms.SeriesFiles[skey]; !ok {
 			return fmt.Errorf("SERIES_IDS contains %q without a matching file", skey)
 		}

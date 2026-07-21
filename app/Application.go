@@ -1,10 +1,12 @@
-// package app ties together all bits and pieces to start the program
+// Package app ties together the program's configuration, user interaction, and services.
 package app
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strconv"
@@ -12,225 +14,243 @@ import (
 	"time"
 
 	"github.com/johannes-kuhfuss/calcmsfeeder/config"
+	"github.com/johannes-kuhfuss/calcmsfeeder/domain"
 	"github.com/johannes-kuhfuss/calcmsfeeder/service"
 )
 
-var (
-	cfg           config.AppConfig
-	calCmsService service.CalCmsService
-	overwrite     bool
-)
+const dateFormat = "2006-01-02"
 
-const (
-	dateFormat = "2006-01-02"
-)
+// Runner owns the mutable state and dependencies for one application run.
+type Runner struct {
+	Cfg       config.AppConfig
+	Plan      domain.ExecutionPlan
+	Service   service.CalCmsService
+	Input     *bufio.Scanner
+	Output    io.Writer
+	Now       func() time.Time
+	Overwrite bool
+}
 
-// RunApp orchestrates the application
+// RunApp parses command-line options, loads configuration, and runs the CLI.
 func RunApp() error {
-	getCmdLine()
-	if err := config.InitConfig(config.EnvFile, &cfg); err != nil {
+	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	envFile := flags.String("config.file", ".env", "Specify location of config file. Default is .env")
+	overwrite := flags.Bool("overwrite", false, "Replace an active recording when an upload is already present")
+	if err := flags.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
-	wireApp()
-	if err := getUserInput(); err != nil {
+
+	var cfg config.AppConfig
+	if err := config.InitConfig(*envFile, &cfg); err != nil {
 		return err
 	}
-	if err := queryCalCmsEvents(); err != nil {
+	runner := NewRunner(cfg, os.Stdin, os.Stdout, time.Now)
+	runner.Overwrite = *overwrite
+	runner.Service = service.NewCalCmsService(&runner.Cfg)
+	return runner.Run()
+}
+
+// NewRunner constructs a runner with a single shared input scanner.
+func NewRunner(cfg config.AppConfig, input io.Reader, output io.Writer, now func() time.Time) *Runner {
+	if now == nil {
+		now = time.Now
+	}
+	plan := domain.ExecutionPlan{Series: make(map[string]domain.SeriesPlan, len(cfg.Series))}
+	for key, series := range cfg.Series {
+		plan.Series[key] = domain.SeriesPlan{SeriesInfo: series}
+	}
+	return &Runner{
+		Cfg:    cfg,
+		Plan:   plan,
+		Input:  bufio.NewScanner(input),
+		Output: output,
+		Now:    now,
+	}
+}
+
+// Run executes the interactive application workflow.
+func (r *Runner) Run() error {
+	if r.Service == nil {
+		return fmt.Errorf("calCMS service is nil")
+	}
+	if err := r.getUserInput(); err != nil {
 		return err
 	}
-	confirmed, err := showStatusAndConfirm()
+	if err := r.queryCalCMSEvents(); err != nil {
+		return err
+	}
+	confirmed, err := r.showStatusAndConfirm()
 	if err != nil {
 		return err
 	}
 	if confirmed {
-		if err := uploadFilesToCalCms(); err != nil {
-			return err
-		}
+		return r.uploadFilesToCalCMS()
 	}
 	return nil
 }
 
-// getCmdLine checks the command line arguments
-func getCmdLine() {
-	flag.StringVar(&config.EnvFile, "config.file", ".env", "Specify location of config file. Default is .env")
-	flag.BoolVar(&overwrite, "overwrite", false, "Replace an active recording when an upload is already present")
-	flag.Parse()
-}
-
-// wireApp initializes the services in the right order and injects the dependencies
-func wireApp() {
-	calCmsService = service.NewCalCmsService(&cfg)
-}
-
-// getUserInput retrieves the dates to work on
-func getUserInput() error {
-	if err := readStartDate(); err != nil {
+func (r *Runner) getUserInput() error {
+	if err := r.readStartDate(); err != nil {
 		return err
 	}
-	return readDuration()
+	return r.readDuration()
 }
 
-// readStartDate prompts the user for the start date
-func readStartDate() error {
-	var (
-		dateOk    bool = false
-		startDate string
-		today     time.Time
-	)
-	scanner := bufio.NewScanner(os.Stdin)
-	today = time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.Local)
-	for !dateOk {
-		fmt.Print("Enter start date as YYYY-MM-DD (or leave empty for today): ")
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return fmt.Errorf("read start date: %w", err)
-			}
-			return fmt.Errorf("read start date: input closed")
+func (r *Runner) readLine(context string) (string, error) {
+	if !r.Input.Scan() {
+		if err := r.Input.Err(); err != nil {
+			return "", fmt.Errorf("%s: %w", context, err)
 		}
-		startDate = scanner.Text()
+		return "", fmt.Errorf("%s: input closed", context)
+	}
+	return r.Input.Text(), nil
+}
+
+func (r *Runner) readStartDate() error {
+	now := r.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	for {
+		fmt.Fprint(r.Output, "Enter start date as YYYY-MM-DD (or leave empty for today): ")
+		startDate, err := r.readLine("read start date")
+		if err != nil {
+			return err
+		}
 		if startDate == "" {
-			cfg.RunTime.StartDate = today
-			dateOk = true
+			r.Plan.StartDate = today
 			return nil
 		}
-		d, err := time.ParseInLocation(dateFormat, startDate, time.Local)
+		d, err := time.ParseInLocation(dateFormat, startDate, today.Location())
 		if err != nil {
-			fmt.Println("Start Date must be entered as YYYY-MM-DD.")
-		} else {
-			if d.Before(today) {
-				fmt.Println("Start Date must be today or later")
-			} else {
-				cfg.RunTime.StartDate = d
-				dateOk = true
-				return nil
-			}
+			fmt.Fprintln(r.Output, "Start Date must be entered as YYYY-MM-DD.")
+			continue
 		}
+		if d.Before(today) {
+			fmt.Fprintln(r.Output, "Start Date must be today or later")
+			continue
+		}
+		r.Plan.StartDate = d
+		return nil
 	}
-	return nil
 }
 
-// readDuration prompts the user for the duration in number of days
-func readDuration() error {
-	var (
-		durOk    bool = false
-		duration string
-	)
-	scanner := bufio.NewScanner(os.Stdin)
-	for !durOk {
-		fmt.Printf("Enter processing duration in days (1 .. %v, or leave empty for default = %v): ", cfg.CalCms.MaxDurationInDays, cfg.CalCms.DefaultDurationInDays)
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
-				return fmt.Errorf("read duration: %w", err)
-			}
-			return fmt.Errorf("read duration: input closed")
+func (r *Runner) readDuration() error {
+	for {
+		fmt.Fprintf(r.Output, "Enter processing duration in days (1 .. %v, or leave empty for default = %v): ", r.Cfg.CalCms.MaxDurationInDays, r.Cfg.CalCms.DefaultDurationInDays)
+		duration, err := r.readLine("read duration")
+		if err != nil {
+			return err
 		}
-		duration = scanner.Text()
 		if duration == "" {
-			cfg.RunTime.EndDate = endDateForDuration(cfg.RunTime.StartDate, cfg.CalCms.DefaultDurationInDays)
+			r.Plan.EndDate = endDateForDuration(r.Plan.StartDate, r.Cfg.CalCms.DefaultDurationInDays)
 			return nil
 		}
-		d, err := strconv.Atoi(duration)
+		days, err := strconv.Atoi(duration)
 		if err != nil {
-			fmt.Println("Duration must be a numeric value.")
-		} else {
-			if (d < 1) || (d > cfg.CalCms.MaxDurationInDays) {
-				fmt.Printf("Duration must be between 1 and %v.\r\n", cfg.CalCms.MaxDurationInDays)
-			} else {
-				cfg.RunTime.EndDate = endDateForDuration(cfg.RunTime.StartDate, d)
-				return nil
-			}
+			fmt.Fprintln(r.Output, "Duration must be a numeric value.")
+			continue
 		}
+		if days < 1 || days > r.Cfg.CalCms.MaxDurationInDays {
+			fmt.Fprintf(r.Output, "Duration must be between 1 and %v.\r\n", r.Cfg.CalCms.MaxDurationInDays)
+			continue
+		}
+		r.Plan.EndDate = endDateForDuration(r.Plan.StartDate, days)
+		return nil
 	}
-	return nil
 }
 
 func endDateForDuration(start time.Time, days int) time.Time {
 	return start.AddDate(0, 0, days-1)
 }
 
-func showStatusAndConfirm() (bool, error) {
-	fmt.Printf("Using start date %v\r\n", cfg.RunTime.StartDate.Format(dateFormat))
-	fmt.Printf("Using end date %v\r\n", cfg.RunTime.EndDate.Format(dateFormat))
-	fmt.Printf("Overwrite existing recordings: %v\r\n", overwrite)
-	for _, entry := range sortedSeriesKeys() {
-		data := cfg.RunTime.Series[entry]
-		fmt.Printf("For \"%v\" found %v entries. Will upload file \"%v\". (IDs: %v)\r\n", entry, len(data.EventIds), data.FileToUpload, data.EventIds)
+func (r *Runner) showStatusAndConfirm() (bool, error) {
+	fmt.Fprintf(r.Output, "Using start date %v\r\n", r.Plan.StartDate.Format(dateFormat))
+	fmt.Fprintf(r.Output, "Using end date %v\r\n", r.Plan.EndDate.Format(dateFormat))
+	fmt.Fprintf(r.Output, "Overwrite existing recordings: %v\r\n", r.Overwrite)
+	for _, key := range r.sortedSeriesKeys() {
+		data := r.Plan.Series[key]
+		fmt.Fprintf(r.Output, "For \"%v\" found %v entries. Will upload file \"%v\". (IDs: %v)\r\n", key, len(data.EventIDs), data.FileToUpload, data.EventIDs)
 	}
-	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Print("Confirm with \"y\" to continue: ")
-	if !scanner.Scan() {
-		if err := scanner.Err(); err != nil {
-			return false, fmt.Errorf("read confirmation: %w", err)
-		}
-		return false, fmt.Errorf("read confirmation: input closed")
+	fmt.Fprint(r.Output, "Confirm with \"y\" to continue: ")
+	decision, err := r.readLine("read confirmation")
+	if err != nil {
+		return false, err
 	}
-	decision := strings.TrimSpace(scanner.Text())
-	if !strings.EqualFold(decision, "y") {
-		fmt.Print("Aborting...")
+	if !strings.EqualFold(strings.TrimSpace(decision), "y") {
+		fmt.Fprint(r.Output, "Aborting...")
 		return false, nil
 	}
 	return true, nil
 }
 
-// queryCalCmsEvents retrieves all events for the date range from calCms and filters them to match the series configuration
-func queryCalCmsEvents() error {
-	if err := calCmsService.QueryEventsFromCalCms(); err != nil {
-		return fmt.Errorf("query events from calCms: %w", err)
+func (r *Runner) queryCalCMSEvents() error {
+	events, err := r.Service.QueryEvents(r.Plan.StartDate, r.Plan.EndDate)
+	if err != nil {
+		return fmt.Errorf("query events from calCMS: %w", err)
 	}
-	if err := calCmsService.FilterEventsFromCalCms(); err != nil {
-		return fmt.Errorf("filter events from calCms: %w", err)
+	for key, entry := range r.Plan.Series {
+		entry.EventIDs = nil
+		r.Plan.Series[key] = entry
+	}
+	for _, event := range events {
+		if entry, ok := r.Plan.Series[event.Skey]; ok {
+			entry.EventIDs = append(entry.EventIDs, event.EventID)
+			r.Plan.Series[event.Skey] = entry
+		}
 	}
 	return nil
 }
 
-// uploadFilesToCalCms uploads the configured file to calCms for each matching event
-func uploadFilesToCalCms() error {
-	if eventCount() == 0 {
-		fmt.Println("No matching events; nothing to upload.")
+func (r *Runner) uploadFilesToCalCMS() error {
+	if r.eventCount() == 0 {
+		fmt.Fprintln(r.Output, "No matching events; nothing to upload.")
 		return nil
 	}
-	if err := calCmsService.Login(cfg.CalCms.CmsUser, cfg.CalCms.CmsPass); err != nil {
-		return fmt.Errorf("log in to calCms: %w", err)
+	if err := r.Service.Login(r.Cfg.CalCms.CmsUser, r.Cfg.CalCms.CmsPass); err != nil {
+		return fmt.Errorf("log in to calCMS: %w", err)
 	}
-	for _, entry := range sortedSeriesKeys() {
-		data := cfg.RunTime.Series[entry]
-		if len(data.EventIds) == 0 {
+	for _, key := range r.sortedSeriesKeys() {
+		data := r.Plan.Series[key]
+		if len(data.EventIDs) == 0 {
 			continue
 		}
-		fmt.Printf("Uploading files for \"%v\".\r\n", entry)
-		for _, evId := range data.EventIds {
-			hasRecording, err := calCmsService.HasRecording(evId, data.SeriesId)
+		fmt.Fprintf(r.Output, "Uploading files for \"%v\".\r\n", key)
+		for _, eventID := range data.EventIDs {
+			hasRecording, err := r.Service.HasRecording(eventID, data.SeriesID)
 			if err != nil {
-				return fmt.Errorf("check existing recording for event %d: %w", evId, err)
+				return fmt.Errorf("check existing recording for event %d: %w", eventID, err)
 			}
-			if hasRecording && !overwrite {
-				fmt.Printf("Skipping event %d: an active recording is already present (use -overwrite to replace it).\r\n", evId)
+			if hasRecording && !r.Overwrite {
+				fmt.Fprintf(r.Output, "Skipping event %d: an active recording is already present (use -overwrite to replace it).\r\n", eventID)
 				continue
 			}
 			if hasRecording {
-				fmt.Printf("Overwriting active recording for event %d.\r\n", evId)
+				fmt.Fprintf(r.Output, "Overwriting active recording for event %d.\r\n", eventID)
 			}
-			if err := calCmsService.UploadFile(evId, data.SeriesId, data.FileToUpload); err != nil {
-				return fmt.Errorf("upload %q for event %d: %w", data.FileToUpload, evId, err)
+			if err := r.Service.UploadFile(eventID, data.SeriesID, data.FileToUpload); err != nil {
+				return fmt.Errorf("upload %q for event %d: %w", data.FileToUpload, eventID, err)
 			}
 		}
 	}
 	return nil
 }
 
-func sortedSeriesKeys() []string {
-	keys := make([]string, 0, len(cfg.RunTime.Series))
-	for key := range cfg.RunTime.Series {
+func (r *Runner) sortedSeriesKeys() []string {
+	keys := make([]string, 0, len(r.Plan.Series))
+	for key := range r.Plan.Series {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	return keys
 }
 
-func eventCount() int {
+func (r *Runner) eventCount() int {
 	count := 0
-	for _, data := range cfg.RunTime.Series {
-		count += len(data.EventIds)
+	for _, data := range r.Plan.Series {
+		count += len(data.EventIDs)
 	}
 	return count
 }

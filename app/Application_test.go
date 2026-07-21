@@ -1,6 +1,9 @@
 package app
 
 import (
+	"bufio"
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,14 +32,16 @@ func TestEndDateForDurationIsInclusive(t *testing.T) {
 }
 
 type recordingTestService struct {
+	events       []domain.CalCMSEvent
 	hasRecording bool
 	loginCalls   int
 	checkCalls   int
 	uploadCalls  int
 }
 
-func (s *recordingTestService) QueryEventsFromCalCms() error  { return nil }
-func (s *recordingTestService) FilterEventsFromCalCms() error { return nil }
+func (s *recordingTestService) QueryEvents(time.Time, time.Time) ([]domain.CalCMSEvent, error) {
+	return s.events, nil
+}
 func (s *recordingTestService) Login(string, string) error {
 	s.loginCalls++
 	return nil
@@ -50,12 +55,23 @@ func (s *recordingTestService) UploadFile(int, int, string) error {
 	return nil
 }
 
-func TestUploadFilesHonorsOverwriteFlag(t *testing.T) {
-	originalCfg, originalService, originalOverwrite := cfg, calCmsService, overwrite
-	defer func() {
-		cfg, calCmsService, overwrite = originalCfg, originalService, originalOverwrite
-	}()
+func testRunner(fake *recordingTestService) *Runner {
+	cfg := config.AppConfig{}
+	cfg.CalCms.CmsUser = "user"
+	cfg.CalCms.CmsPass = "secret"
+	cfg.CalCms.DefaultDurationInDays = 7
+	cfg.CalCms.MaxDurationInDays = 30
+	cfg.Series = map[string]domain.SeriesInfo{
+		"show": {SeriesID: 99, FileToUpload: "show.stream"},
+	}
+	runner := NewRunner(cfg, strings.NewReader(""), &bytes.Buffer{}, func() time.Time {
+		return time.Date(2026, time.July, 21, 12, 0, 0, 0, time.UTC)
+	})
+	runner.Service = fake
+	return runner
+}
 
+func TestUploadFilesHonorsOverwriteFlag(t *testing.T) {
 	tests := []struct {
 		name        string
 		overwrite   bool
@@ -66,19 +82,32 @@ func TestUploadFilesHonorsOverwriteFlag(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg = config.AppConfig{}
-			cfg.RunTime.Series = map[string]domain.SeriesInfo{
-				"show": {SeriesId: 99, FileToUpload: "show.stream", EventIds: []int{42}},
-			}
 			fake := &recordingTestService{hasRecording: true}
-			calCmsService = fake
-			overwrite = tt.overwrite
-			if err := uploadFilesToCalCms(); err != nil {
+			runner := testRunner(fake)
+			runner.Plan.Series["show"] = domain.SeriesPlan{
+				SeriesInfo: domain.SeriesInfo{SeriesID: 99, FileToUpload: "show.stream"},
+				EventIDs:   []int{42},
+			}
+			runner.Overwrite = tt.overwrite
+			if err := runner.uploadFilesToCalCMS(); err != nil {
 				t.Fatal(err)
 			}
 			if fake.loginCalls != 1 || fake.checkCalls != 1 || fake.uploadCalls != tt.wantUploads {
 				t.Fatalf("calls: login=%d check=%d upload=%d, want 1, 1, %d", fake.loginCalls, fake.checkCalls, fake.uploadCalls, tt.wantUploads)
 			}
 		})
+	}
+}
+
+func TestRunConsumesPipedInputWithOneScanner(t *testing.T) {
+	fake := &recordingTestService{events: []domain.CalCMSEvent{{EventID: 42, Skey: "show"}}}
+	runner := testRunner(fake)
+	runner.Input = bufio.NewScanner(strings.NewReader("\n\ny\n"))
+
+	if err := runner.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if fake.uploadCalls != 1 {
+		t.Fatalf("upload calls = %d, want 1", fake.uploadCalls)
 	}
 }
