@@ -111,6 +111,10 @@ func TestLoginAndUploadProtocol(t *testing.T) {
 			if err != nil || cookie.Value != "abc" {
 				t.Errorf("session cookie = %v, %v", cookie, err)
 			}
+			if r.Method == http.MethodGet {
+				io.WriteString(w, `<table><tr class="active"><td>existing.stream</td></tr></table>`)
+				return
+			}
 			if err := r.ParseMultipartForm(1 << 20); err != nil {
 				t.Errorf("parse upload: %v", err)
 				return
@@ -144,8 +148,31 @@ func TestLoginAndUploadProtocol(t *testing.T) {
 	if err := svc.Login("alice", "s3cret"); err != nil {
 		t.Fatal(err)
 	}
+	hasRecording, err := svc.HasRecording(42, 99)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRecording {
+		t.Fatal("HasRecording() = false, want true")
+	}
 	if err := svc.UploadFile(42, 99, uploadFile); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHasRecordingRejectsAuthenticationRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			io.WriteString(w, "login")
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer server.Close()
+	svc := NewCalCmsServiceWithClient(serviceTestConfig(server.URL), server.Client())
+	_, err := svc.HasRecording(42, 99)
+	if err == nil || !strings.Contains(err.Error(), "redirected") {
+		t.Fatalf("HasRecording() error = %v, want redirect error", err)
 	}
 }
 

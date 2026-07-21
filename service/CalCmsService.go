@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -178,7 +179,7 @@ func (s *DefaultCalCmsService) HasRecording(eventID, seriesID int) (bool, error)
 	if resp.StatusCode != http.StatusOK {
 		return false, fmt.Errorf("calCMS recording check returned HTTP %d", resp.StatusCode)
 	}
-	if resp.Request != nil && resp.Request != req {
+	if resp.Request != nil && !sameEndpoint(resp.Request.URL, calURL) {
 		return false, fmt.Errorf("calCMS recording check was redirected to %q", resp.Request.URL.Path)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -186,6 +187,15 @@ func (s *DefaultCalCmsService) HasRecording(eventID, seriesID int) (bool, error)
 		return false, fmt.Errorf("read recording check response: %w", err)
 	}
 	return activeRecordingRow.Match(body), nil
+}
+
+func sameEndpoint(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	leftPath := pathpkg.Clean("/" + strings.TrimPrefix(left.Path, "/"))
+	rightPath := pathpkg.Clean("/" + strings.TrimPrefix(right.Path, "/"))
+	return strings.EqualFold(left.Scheme, right.Scheme) && strings.EqualFold(left.Host, right.Host) && leftPath == rightPath
 }
 
 // UploadFile uploads a specified file to a specified event in a series
